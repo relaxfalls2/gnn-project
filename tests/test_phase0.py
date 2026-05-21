@@ -89,6 +89,15 @@ class TestSetSeed:
         b = torch.randn(10)
         assert not torch.allclose(a, b), "Different seeds should produce different tensors"
 
+    def test_deterministic_flag_controls_cudnn(self):
+        set_seed(0, deterministic=True)
+        assert torch.backends.cudnn.deterministic is True
+        assert torch.backends.cudnn.benchmark is False
+
+        set_seed(0, deterministic=False)
+        assert torch.backends.cudnn.deterministic is False
+        assert torch.backends.cudnn.benchmark is True
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # EarlyStopping tests

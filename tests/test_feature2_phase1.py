@@ -461,7 +461,7 @@ class TestTransferTrainerOptimizations:
             val_dataset=TinyDS(),
             test_dataset=TinyDS(),
             task_names=["t0", "t1"],
-            config={"batch_size": 4, "epochs": 1},
+            config={"batch_size": 4, "epochs": 2},
             checkpoint_dir=str(tmp_path),
             result_dir=str(tmp_path),
             device="cpu",

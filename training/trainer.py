@@ -99,7 +99,7 @@ class Trainer:
         self.cfg          = cfg
         self.ckpt_path    = ckpt_path
         self.use_amp      = self.device.type == "cuda"
-        self.scaler       = torch.amp.GradScaler("cuda", enabled=self.use_amp)
+        self.scaler       = torch.amp.GradScaler(self.device.type, enabled=self.use_amp)
 
         self.optimizer = Adam(
             self.model.parameters(),
@@ -124,7 +124,7 @@ class Trainer:
         for batch in self.train_loader:
             batch = batch.to(self.device)
             self.optimizer.zero_grad(set_to_none=True)
-            with torch.amp.autocast("cuda", enabled=self.use_amp):
+            with torch.amp.autocast(self.device.type, enabled=self.use_amp):
                 loss = self.model.compute_loss(batch)
             self.scaler.scale(loss).backward()
             self.scaler.unscale_(self.optimizer)

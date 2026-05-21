@@ -140,7 +140,7 @@ class TransferTrainer:
             self.optimizer, mode="max", factor=0.5, patience=10
         )
         self.use_amp = self.device.type == "cuda"
-        self.scaler = torch.amp.GradScaler("cuda", enabled=self.use_amp)
+        self.scaler = torch.amp.GradScaler(self.device.type, enabled=self.use_amp)
 
         # Early stopping
         self.early_stopping = TransferEarlyStopping(patience=self.patience)
@@ -166,7 +166,7 @@ class TransferTrainer:
             shuffle=shuffle,
             num_workers=num_workers,
             pin_memory=torch.cuda.is_available(),
-            persistent_workers=num_workers > 0,
+            persistent_workers=num_workers > 0 and self.epochs > 1,
         )
 
     def _train_epoch(self, loader) -> float:
@@ -178,7 +178,7 @@ class TransferTrainer:
             batch = batch.to(self.device)
             self.optimizer.zero_grad(set_to_none=True)
 
-            with torch.amp.autocast("cuda", enabled=self.use_amp):
+            with torch.amp.autocast(self.device.type, enabled=self.use_amp):
                 loss = self.model.compute_loss(batch)
             self.scaler.scale(loss).backward()
             self.scaler.unscale_(self.optimizer)

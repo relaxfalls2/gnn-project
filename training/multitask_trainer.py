@@ -59,7 +59,7 @@ class MultiTaskTrainer:
             self.model = torch.compile(self.model)
         self._checkpoint_model = getattr(self.model, "_orig_mod", self.model)
         self.use_amp = self.device.type == "cuda"
-        self.scaler = torch.amp.GradScaler("cuda", enabled=self.use_amp)
+        self.scaler = torch.amp.GradScaler(self.device.type, enabled=self.use_amp)
 
         self.train_loader = train_loader
         self.val_loaders = val_loaders
@@ -168,7 +168,7 @@ class MultiTaskTrainer:
 
             if self.use_pcgrad:
                 # ── PCGrad path ──────────────────────────────────────
-                with torch.amp.autocast("cuda", enabled=self.use_amp):
+                with torch.amp.autocast(self.device.type, enabled=self.use_amp):
                     task_losses = self.model.compute_per_task_losses(batch)
 
                 if not task_losses:
@@ -201,7 +201,7 @@ class MultiTaskTrainer:
             else:
                 # ── Standard path ────────────────────────────────────
                 self.optimizer.zero_grad(set_to_none=True)
-                with torch.amp.autocast("cuda", enabled=self.use_amp):
+                with torch.amp.autocast(self.device.type, enabled=self.use_amp):
                     loss = self.model.compute_loss(batch)
 
                 assert loss.device.type == self.device.type, (

@@ -278,7 +278,7 @@ class MultiTaskTrainer:
         """
         epochs = epochs or self.cfg.get("epochs", 200)
         self._resume_path = self.ckpt_path.replace(".pt", "_resume.pt")
-        # Save resume state periodically to reduce checkpoint I/O overhead.
+        # Save resume state every N epochs to reduce checkpoint I/O overhead.
         resume_save_interval = self.cfg.get("resume_save_interval", 10)
 
         print(f"\n  Device: {self.device}")

@@ -19,6 +19,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from evaluation.metrics import compute_roc_auc
 
+DEFAULT_MAX_WORKERS = 4
+
 
 # ─────────────────────────────────────────────
 # Transfer Early Stopping
@@ -154,7 +156,10 @@ class TransferTrainer:
         available_cpus = os.cpu_count() or 1
         # Cap at 4 workers to improve host-to-device throughput without
         # oversubscribing typical single-GPU training pods.
-        num_workers = self.config.get("num_workers", min(4, available_cpus))
+        num_workers = self.config.get(
+            "num_workers",
+            min(DEFAULT_MAX_WORKERS, available_cpus),
+        )
         return PyGDataLoader(
             dataset,
             batch_size=self.batch_size,

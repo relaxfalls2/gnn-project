@@ -469,7 +469,7 @@ class TestTransferTrainerOptimizations:
         )
 
         loader = trainer._build_loader(trainer.train_dataset, shuffle=True)
-        assert loader.num_workers == 4
+        assert loader.num_workers == min(4, os.cpu_count() or 1)
         assert loader.pin_memory == torch.cuda.is_available()
         assert loader.persistent_workers is True
 

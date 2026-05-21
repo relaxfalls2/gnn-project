@@ -65,10 +65,7 @@ class TransferEarlyStopping:
         """Restore model to best checkpoint."""
         if self.ckpt_path is not None:
             if device is None:
-                try:
-                    device = next(model.parameters()).device
-                except StopIteration:
-                    device = torch.device("cpu")
+                device = torch.device("cpu")
             model.load_state_dict(torch.load(self.ckpt_path, map_location=device))
         elif self.best_state is not None:
             model.load_state_dict(self.best_state)
@@ -154,7 +151,8 @@ class TransferTrainer:
         }
 
     def _build_loader(self, dataset, shuffle: bool = False) -> PyGDataLoader:
-        num_workers = 4
+        available_cpus = os.cpu_count() or 1
+        num_workers = min(4, available_cpus)
         return PyGDataLoader(
             dataset,
             batch_size=self.batch_size,

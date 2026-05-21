@@ -184,6 +184,9 @@ class MultiTaskTrainer:
                     )
 
                 self.optimizer.zero_grad()
+                # GradScaler uses one shared scale factor, so PCGrad sees
+                # consistently scaled gradients before they are unscaled on
+                # the base optimizer.
                 scaled_losses = [self.scaler.scale(loss) for loss in losses]
                 stats = self.optimizer.backward(scaled_losses)
                 self.scaler.unscale_(self._base_optimizer)
@@ -276,7 +279,7 @@ class MultiTaskTrainer:
         epochs = epochs or self.cfg.get("epochs", 200)
         self._resume_path = self.ckpt_path.replace(".pt", "_resume.pt")
         # Save resume state periodically to reduce checkpoint I/O overhead.
-        resume_save_interval = 10
+        resume_save_interval = self.cfg.get("resume_save_interval", 10)
 
         print(f"\n  Device: {self.device}")
         print(f"  PCGrad: {self.use_pcgrad}")

@@ -19,7 +19,7 @@ from evaluation.metrics import compute_roc_auc
 # ─────────────────────────────────────────────────────────────────────────────
 
 def set_seed(seed: int, deterministic: bool = False):
-    """Fix all random sources for reproducibility."""
+    """Fix random sources; deterministic=False keeps cuDNN autotuning enabled."""
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)

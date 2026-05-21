@@ -231,6 +231,24 @@ class TestTaskConditionedEGNN:
         assert isinstance(losses, dict)
         assert len(losses) > 0
         assert all(torch.isfinite(loss) for loss in losses.values())
+
+    def test_classifier_per_task_losses_single_forward(self, sample_multitask_batch, model_config):
+        from models.task_conditioned_egnn import MultiTaskClassifier
+
+        model = MultiTaskClassifier(**model_config)
+        task_ids = sample_multitask_batch.task_id.squeeze()
+        call_count = {"value": 0}
+
+        def fake_forward(batch, task_id=None):
+            call_count["value"] += 1
+            assert torch.equal(task_id, task_ids)
+            return torch.randn(task_ids.size(0), 1)
+
+        model.forward = fake_forward
+        losses = model.compute_per_task_losses(sample_multitask_batch)
+
+        assert call_count["value"] == 1
+        assert set(losses.keys()) == set(task_ids.unique().tolist())
     
     def test_classifier_backward(self, sample_multitask_batch, model_config):
         from models.task_conditioned_egnn import MultiTaskClassifier
@@ -310,6 +328,30 @@ class TestHardSharingClassifier:
         losses = model.compute_per_task_losses(sample_multitask_batch)
         assert isinstance(losses, dict)
         assert len(losses) > 0
+
+    def test_per_task_losses_single_forward(self, sample_multitask_batch, model_config):
+        from models.task_conditioned_egnn import HardSharingClassifier
+
+        model = HardSharingClassifier(
+            node_dim=model_config["node_dim"],
+            edge_dim=model_config["edge_dim"],
+            hidden_dim=model_config["hidden_dim"],
+            num_layers=model_config["num_layers"],
+            num_tasks=model_config["num_tasks"],
+        )
+        task_ids = sample_multitask_batch.task_id.squeeze()
+        call_count = {"value": 0}
+
+        def fake_forward(batch, task_id=None):
+            call_count["value"] += 1
+            assert torch.equal(task_id, task_ids)
+            return torch.randn(task_ids.size(0), 1)
+
+        model.forward = fake_forward
+        losses = model.compute_per_task_losses(sample_multitask_batch)
+
+        assert call_count["value"] == 1
+        assert set(losses.keys()) == set(task_ids.unique().tolist())
 
 
 # ─────────────────────────────────────────────────────────────────────────────

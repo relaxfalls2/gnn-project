@@ -55,6 +55,11 @@ class MultiTaskTrainer:
         # ── Device setup ─────────────────────────────────────────────────
         self.device = torch.device(device)
         self.model = model.to(self.device)
+        if cfg.get("compile_model", False) and hasattr(torch, "compile"):
+            self.model = torch.compile(self.model)
+        self._checkpoint_model = getattr(self.model, "_orig_mod", self.model)
+        self.use_amp = self.device.type == "cuda"
+        self.scaler = torch.amp.GradScaler(self.device.type, enabled=self.use_amp)
 
         self.train_loader = train_loader
         self.val_loaders = val_loaders
@@ -65,7 +70,7 @@ class MultiTaskTrainer:
 
         # ── Optimizer ────────────────────────────────────────────────────
         base_optimizer = Adam(
-            model.parameters(),
+            self.model.parameters(),
             lr=cfg.get("lr", 1e-3),
             weight_decay=cfg.get("wd", 1e-5),
         )
@@ -115,7 +120,7 @@ class MultiTaskTrainer:
 
         state = torch.load(load_path, map_location=self.device, weights_only=False)
 
-        self.model.load_state_dict(state["model"])
+        self._checkpoint_model.load_state_dict(state["model"])
         self._base_optimizer.load_state_dict(state["optimizer"])
         self.best_avg_auc = state.get("best_avg_auc", 0.0)
         self.patience_counter = state.get("patience_counter", 0)
@@ -129,7 +134,7 @@ class MultiTaskTrainer:
         os.makedirs(os.path.dirname(self.ckpt_path) or ".", exist_ok=True)
 
         torch.save({
-            "model": self.model.state_dict(),
+            "model": self._checkpoint_model.state_dict(),
             "optimizer": self._base_optimizer.state_dict(),
             "best_avg_auc": self.best_avg_auc,
             "patience_counter": self.patience_counter,
@@ -163,7 +168,8 @@ class MultiTaskTrainer:
 
             if self.use_pcgrad:
                 # ── PCGrad path ──────────────────────────────────────
-                task_losses = self.model.compute_per_task_losses(batch)
+                with torch.amp.autocast(self.device.type, enabled=self.use_amp):
+                    task_losses = self.model.compute_per_task_losses(batch)
 
                 if not task_losses:
                     continue
@@ -178,8 +184,14 @@ class MultiTaskTrainer:
                     )
 
                 self.optimizer.zero_grad()
-                stats = self.optimizer.backward(losses)
-                self.optimizer.step()
+                # GradScaler uses one shared scale factor, so PCGrad sees
+                # consistently scaled gradients before they are unscaled on
+                # the base optimizer.
+                scaled_losses = [self.scaler.scale(loss) for loss in losses]
+                stats = self.optimizer.backward(scaled_losses)
+                self.scaler.unscale_(self._base_optimizer)
+                self.scaler.step(self._base_optimizer)
+                self.scaler.update()
 
                 if stats and self.log_pcgrad_stats:
                     epoch_pcgrad_stats.append(stats)
@@ -188,18 +200,21 @@ class MultiTaskTrainer:
 
             else:
                 # ── Standard path ────────────────────────────────────
-                self.optimizer.zero_grad()
-                loss = self.model.compute_loss(batch)
+                self.optimizer.zero_grad(set_to_none=True)
+                with torch.amp.autocast(self.device.type, enabled=self.use_amp):
+                    loss = self.model.compute_loss(batch)
 
                 assert loss.device.type == self.device.type, (
                     f"Loss device mismatch: {loss.device} vs {self.device}"
                 )
 
-                loss.backward()
+                self.scaler.scale(loss).backward()
+                self.scaler.unscale_(self._base_optimizer)
                 torch.nn.utils.clip_grad_norm_(
                     self.model.parameters(), max_norm=1.0
                 )
-                self.optimizer.step()
+                self.scaler.step(self._base_optimizer)
+                self.scaler.update()
                 batch_loss = loss.item()
 
             total_loss += batch_loss
@@ -263,6 +278,8 @@ class MultiTaskTrainer:
         """
         epochs = epochs or self.cfg.get("epochs", 200)
         self._resume_path = self.ckpt_path.replace(".pt", "_resume.pt")
+        # Save resume state every N epochs to reduce checkpoint I/O overhead.
+        resume_save_interval = self.cfg.get("resume_save_interval", 10)
 
         print(f"\n  Device: {self.device}")
         print(f"  PCGrad: {self.use_pcgrad}")
@@ -299,14 +316,19 @@ class MultiTaskTrainer:
                 self.history["pcgrad_stats"].append(pcgrad_stats)
 
             # ── Per-epoch resume checkpoint ───────────────────────────
-            torch.save({
-                "model": self.model.state_dict(),
-                "optimizer": self._base_optimizer.state_dict(),
-                "best_avg_auc": self.best_avg_auc,
-                "patience_counter": self.patience_counter,
-                "epoch": epoch,
-                "history": self.history,
-            }, self._resume_path)
+            if (
+                epoch % resume_save_interval == 0
+                or epoch == epochs
+                or self.patience_counter >= self.patience
+            ):
+                torch.save({
+                    "model": self._checkpoint_model.state_dict(),
+                    "optimizer": self._base_optimizer.state_dict(),
+                    "best_avg_auc": self.best_avg_auc,
+                    "patience_counter": self.patience_counter,
+                    "epoch": epoch,
+                    "history": self.history,
+                }, self._resume_path)
 
             # ── Logging ──────────────────────────────────────────────
             log_line = (
@@ -335,9 +357,9 @@ class MultiTaskTrainer:
             state = torch.load(self.ckpt_path, map_location=self.device, weights_only=False)
             # Handle both full checkpoint (dict) and legacy (state_dict only)
             if isinstance(state, dict) and "model" in state:
-                self.model.load_state_dict(state["model"])
+                self._checkpoint_model.load_state_dict(state["model"])
             else:
-                self.model.load_state_dict(state)
+                self._checkpoint_model.load_state_dict(state)
 
         # ── Final Eval ────────────────────────────────────────────────
         final_aucs = self.eval_all_tasks()

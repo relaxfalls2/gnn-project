@@ -18,14 +18,14 @@ from evaluation.metrics import compute_roc_auc
 # Reproducibility
 # ─────────────────────────────────────────────────────────────────────────────
 
-def set_seed(seed: int):
-    """Fix all random sources for reproducibility."""
+def set_seed(seed: int, deterministic: bool = False):
+    """Fix random sources; deterministic=False keeps cuDNN autotuning enabled."""
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = deterministic
+    torch.backends.cudnn.benchmark = not deterministic
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -89,15 +89,20 @@ class Trainer:
     """
 
     def __init__(self, model, train_loader, val_loader, cfg, device, ckpt_path):
-        self.model        = model.to(device)
+        self.device       = torch.device(device)
+        self.model        = model.to(self.device)
+        if cfg.get("compile_model", False) and hasattr(torch, "compile"):
+            self.model = torch.compile(self.model)
+        self._checkpoint_model = getattr(self.model, "_orig_mod", self.model)
         self.train_loader = train_loader
         self.val_loader   = val_loader
         self.cfg          = cfg
-        self.device       = device
         self.ckpt_path    = ckpt_path
+        self.use_amp      = self.device.type == "cuda"
+        self.scaler       = torch.amp.GradScaler(self.device.type, enabled=self.use_amp)
 
         self.optimizer = Adam(
-            model.parameters(),
+            self.model.parameters(),
             lr=cfg.get("lr", 1e-3),
             weight_decay=cfg.get("wd", 1e-5),
         )
@@ -118,11 +123,14 @@ class Trainer:
         total_loss = 0.0
         for batch in self.train_loader:
             batch = batch.to(self.device)
-            self.optimizer.zero_grad()
-            loss = self.model.compute_loss(batch)
-            loss.backward()
+            self.optimizer.zero_grad(set_to_none=True)
+            with torch.amp.autocast(self.device.type, enabled=self.use_amp):
+                loss = self.model.compute_loss(batch)
+            self.scaler.scale(loss).backward()
+            self.scaler.unscale_(self.optimizer)
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-            self.optimizer.step()
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
             total_loss += loss.item()
         return total_loss / max(len(self.train_loader), 1)
 
@@ -153,7 +161,7 @@ class Trainer:
             val_auc    = self.eval_epoch(self.val_loader)
 
             self.scheduler.step(val_auc)
-            self.es.step(val_auc, self.model, self.ckpt_path)
+            self.es.step(val_auc, self._checkpoint_model, self.ckpt_path)
 
             self.history["train_loss"].append(train_loss)
             self.history["val_auc"].append(val_auc)
@@ -171,5 +179,7 @@ class Trainer:
                 break
 
         # Restore best weights
-        self.model.load_state_dict(torch.load(self.ckpt_path, map_location=self.device))
+        self._checkpoint_model.load_state_dict(
+            torch.load(self.ckpt_path, map_location=self.device)
+        )
         return self.es.best_score

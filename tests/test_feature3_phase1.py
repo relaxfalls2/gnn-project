@@ -319,6 +319,12 @@ class TestAggregateToNodes:
         assert imp.shape == (3,)
         assert (imp > 0).all()
 
+    def test_isolated_node_keeps_zero_importance(self):
+        edge_index = torch.tensor([[0, 1], [1, 0]])
+        mask = torch.tensor([0.3, 0.3])
+        imp = GNNExplainer._aggregate_to_nodes(edge_index, mask, 3)
+        assert imp.tolist() == pytest.approx([0.3, 0.3, 0.0])
+
 
 # ── Mask Utility Tests ────────────────────────────────────────────────────
 

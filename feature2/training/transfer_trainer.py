@@ -19,6 +19,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from evaluation.metrics import compute_roc_auc
 
+DEFAULT_MAX_WORKERS = 4
+
 
 # ─────────────────────────────────────────────
 # Transfer Early Stopping
@@ -33,25 +35,41 @@ class TransferEarlyStopping:
         self.best_score = None
         self.counter = 0
         self.best_state = None
+        self.ckpt_path = None
 
-    def step(self, score: float, model: nn.Module) -> bool:
+    def step(
+        self,
+        score: float,
+        model: nn.Module,
+        ckpt_path: Optional[str] = None,
+    ) -> bool:
         """
         Returns True if training should stop.
         """
         if self.best_score is None or score > self.best_score + self.min_delta:
             self.best_score = score
             self.counter = 0
-            self.best_state = {
-                k: v.cpu().clone() for k, v in model.state_dict().items()
-            }
+            if ckpt_path is not None:
+                os.makedirs(os.path.dirname(ckpt_path) or ".", exist_ok=True)
+                torch.save(model.state_dict(), ckpt_path)
+                self.ckpt_path = ckpt_path
+                self.best_state = None
+            else:
+                self.best_state = {
+                    k: v.cpu().clone() for k, v in model.state_dict().items()
+                }
         else:
             self.counter += 1
 
         return self.counter >= self.patience
 
-    def restore_best(self, model: nn.Module):
+    def restore_best(self, model: nn.Module, device: Optional[torch.device] = None):
         """Restore model to best checkpoint."""
-        if self.best_state is not None:
+        if self.ckpt_path is not None:
+            if device is None:
+                device = torch.device("cpu")
+            model.load_state_dict(torch.load(self.ckpt_path, map_location=device))
+        elif self.best_state is not None:
             model.load_state_dict(self.best_state)
 
 
@@ -87,7 +105,11 @@ class TransferTrainer:
         device: str = "cpu",
         verbose: bool = True,
     ):
-        self.model = model.to(device)
+        self.device = torch.device(device)
+        self.model = model.to(self.device)
+        if config.get("compile_model", False) and hasattr(torch, "compile"):
+            self.model = torch.compile(self.model)
+        self._checkpoint_model = getattr(self.model, "_orig_mod", self.model)
         self.train_dataset = train_dataset
         self.val_dataset = val_dataset
         self.test_dataset = test_dataset
@@ -96,7 +118,6 @@ class TransferTrainer:
         self.config = config
         self.checkpoint_dir = checkpoint_dir
         self.result_dir = result_dir
-        self.device = device
         self.verbose = verbose
 
         os.makedirs(checkpoint_dir, exist_ok=True)
@@ -118,6 +139,8 @@ class TransferTrainer:
         self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             self.optimizer, mode="max", factor=0.5, patience=10
         )
+        self.use_amp = self.device.type == "cuda"
+        self.scaler = torch.amp.GradScaler(self.device.type, enabled=self.use_amp)
 
         # Early stopping
         self.early_stopping = TransferEarlyStopping(patience=self.patience)
@@ -130,11 +153,20 @@ class TransferTrainer:
         }
 
     def _build_loader(self, dataset, shuffle: bool = False) -> PyGDataLoader:
+        available_cpus = os.cpu_count() or 1
+        # Cap at 4 workers to improve host-to-device throughput without
+        # oversubscribing typical single-GPU training pods.
+        num_workers = self.config.get(
+            "num_workers",
+            min(DEFAULT_MAX_WORKERS, available_cpus),
+        )
         return PyGDataLoader(
             dataset,
             batch_size=self.batch_size,
             shuffle=shuffle,
-            num_workers=0,
+            num_workers=num_workers,
+            pin_memory=torch.cuda.is_available(),
+            persistent_workers=num_workers > 0 and self.epochs > 1,
         )
 
     def _train_epoch(self, loader) -> float:
@@ -144,17 +176,20 @@ class TransferTrainer:
 
         for batch in loader:
             batch = batch.to(self.device)
-            self.optimizer.zero_grad()
+            self.optimizer.zero_grad(set_to_none=True)
 
-            loss = self.model.compute_loss(batch)
-            loss.backward()
+            with torch.amp.autocast(self.device.type, enabled=self.use_amp):
+                loss = self.model.compute_loss(batch)
+            self.scaler.scale(loss).backward()
+            self.scaler.unscale_(self.optimizer)
 
             if self.grad_clip > 0:
                 nn.utils.clip_grad_norm_(
                     self.model.parameters(), self.grad_clip
                 )
 
-            self.optimizer.step()
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
             total_loss += loss.item()
             n_batches += 1
 
@@ -239,6 +274,7 @@ class TransferTrainer:
             print(f"{'='*60}")
 
         start_time = time.time()
+        ckpt_path = os.path.join(self.checkpoint_dir, f"{experiment_name}_best.pt")
 
         for epoch in range(self.epochs):
             # Train
@@ -263,13 +299,17 @@ class TransferTrainer:
                       f"LR: {current_lr:.2e}")
 
             # Early stopping
-            if self.early_stopping.step(val_auc, self.model):
+            if self.early_stopping.step(
+                val_auc,
+                self._checkpoint_model,
+                ckpt_path if save_checkpoint else None,
+            ):
                 if self.verbose:
                     print(f"  Early stopping at epoch {epoch}")
                 break
 
         # Restore best model
-        self.early_stopping.restore_best(self.model)
+        self.early_stopping.restore_best(self._checkpoint_model, self.device)
 
         # Final test evaluation
         test_auc, test_per_task = self._evaluate(test_loader)

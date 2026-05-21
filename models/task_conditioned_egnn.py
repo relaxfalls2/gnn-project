@@ -10,7 +10,7 @@ import torch.nn as nn
 from typing import Dict
 import torch.nn.functional as F
 from torch_geometric.nn import global_mean_pool
-from torch_geometric.utils import add_self_loops
+from torch_geometric.utils import add_self_loops, contains_self_loops
 from typing import Optional
 
 
@@ -227,16 +227,17 @@ class TaskConditionedEGNN(nn.Module):
         node_task_ids = task_ids[batch.batch]  # [num_nodes]
         task_emb = self.task_embeddings(node_task_ids)  # [num_nodes, task_dim]
         
-        # Add self-loops
-        edge_index, _ = add_self_loops(edge_index, num_nodes=h.size(0))
-        
-        # Pad edge_attr for self-loops
-        num_self_loops = h.size(0)
-        self_loop_attr = torch.zeros(
-            num_self_loops, edge_attr.size(1),
-            device=edge_attr.device, dtype=edge_attr.dtype
-        )
-        edge_attr = torch.cat([edge_attr, self_loop_attr], dim=0)
+        if not contains_self_loops(edge_index):
+            # Add self-loops
+            edge_index, _ = add_self_loops(edge_index, num_nodes=h.size(0))
+
+            # Pad edge_attr for self-loops
+            num_self_loops = h.size(0)
+            self_loop_attr = torch.zeros(
+                num_self_loops, edge_attr.size(1),
+                device=edge_attr.device, dtype=edge_attr.dtype
+            )
+            edge_attr = torch.cat([edge_attr, self_loop_attr], dim=0)
         
         # Message passing
         for layer in self.layers:
@@ -367,16 +368,15 @@ class MultiTaskClassifier(nn.Module):
             task_ids = task_ids.unsqueeze(0)
         task_ids = task_ids.to(device)
 
-        unique_tasks = task_ids.unique()
+        all_logits = self.forward(batch, task_ids)
         losses = {}
 
-        for tid in unique_tasks:
+        for tid in task_ids.unique():
             mask = task_ids == tid
             if mask.sum() > 0:
-                task_logits = self.forward(batch, task_ids)[mask]
                 task_labels = batch.y[mask].to(device)
                 losses[tid.item()] = F.binary_cross_entropy_with_logits(
-                    task_logits.squeeze(-1), task_labels
+                    all_logits[mask].squeeze(-1), task_labels
                 )
 
         return losses
@@ -467,16 +467,15 @@ class HardSharingClassifier(nn.Module):
             task_ids = task_ids.unsqueeze(0)
         task_ids = task_ids.to(device)
 
-        unique_tasks = task_ids.unique()
+        all_logits = self.forward(batch, task_ids)
         losses = {}
 
-        for tid in unique_tasks:
+        for tid in task_ids.unique():
             mask = task_ids == tid
             if mask.sum() > 0:
-                task_logits = self.forward(batch, task_ids)[mask]
                 task_labels = batch.y[mask].to(device)
                 losses[tid.item()] = F.binary_cross_entropy_with_logits(
-                    task_logits.squeeze(-1), task_labels
+                    all_logits[mask].squeeze(-1), task_labels
                 )
 
         return losses

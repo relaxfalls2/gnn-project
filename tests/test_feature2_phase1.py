@@ -4,6 +4,7 @@ Tests for Feature 2 Phase 1: Transfer Learning Infrastructure.
 
 import pytest
 import torch
+import torch.nn as nn
 import numpy as np
 import os
 import sys
@@ -424,6 +425,75 @@ class TestTransferMetrics:
         table = build_comparison_table(results)
         assert "linear_probe_sider" in table
         assert "scratch_sider" in table
+
+
+class TestTransferTrainerOptimizations:
+
+    def test_build_loader_uses_workers_and_pin_memory(self, mock_checkpoint_path, tmp_path):
+        from feature2.models.pretrained_encoder import load_feature1_checkpoint, FrozenEncoder
+        from feature2.models.transfer_heads import LinearProbeClassifier
+        from feature2.training.transfer_trainer import TransferTrainer
+        from torch_geometric.data import Data
+
+        class TinyDS:
+            def __init__(self, n=8, t=2):
+                self.data_list = [
+                    Data(
+                        x=torch.randn(6, 129),
+                        edge_index=torch.randint(0, 6, (2, 12)),
+                        edge_attr=torch.randn(12, 6),
+                        pos=torch.randn(6, 3),
+                        y=torch.randint(0, 2, (t,)).float(),
+                    ) for _ in range(n)
+                ]
+            def __len__(self): return len(self.data_list)
+            def __getitem__(self, i): return self.data_list[i]
+
+        model_f1 = load_feature1_checkpoint(
+            mock_checkpoint_path, "task_conditioned", "cpu", verbose=False
+        )
+        encoder = FrozenEncoder(model_f1, "task_conditioned")
+        model = LinearProbeClassifier(encoder=encoder, num_tasks=2)
+
+        trainer = TransferTrainer(
+            model=model,
+            train_dataset=TinyDS(),
+            val_dataset=TinyDS(),
+            test_dataset=TinyDS(),
+            task_names=["t0", "t1"],
+            config={"batch_size": 4, "epochs": 2},
+            checkpoint_dir=str(tmp_path),
+            result_dir=str(tmp_path),
+            device="cpu",
+            verbose=False,
+        )
+
+        loader = trainer._build_loader(trainer.train_dataset, shuffle=True)
+        assert loader.num_workers == min(4, os.cpu_count() or 1)
+        assert loader.pin_memory == torch.cuda.is_available()
+        assert loader.persistent_workers is True
+
+    def test_transfer_early_stopping_can_restore_from_disk(self, tmp_path):
+        from feature2.training.transfer_trainer import TransferEarlyStopping
+
+        model = nn.Linear(3, 1)
+        ckpt_path = tmp_path / "best.pt"
+        es = TransferEarlyStopping(patience=2)
+
+        with torch.no_grad():
+            model.weight.fill_(1.5)
+            model.bias.fill_(0.25)
+        es.step(0.8, model, str(ckpt_path))
+
+        with torch.no_grad():
+            model.weight.zero_()
+            model.bias.zero_()
+
+        es.restore_best(model, torch.device("cpu"))
+
+        assert ckpt_path.exists()
+        assert torch.allclose(model.weight, torch.full_like(model.weight, 1.5))
+        assert torch.allclose(model.bias, torch.full_like(model.bias, 0.25))
 
 
 # ─────────────────────────────────────────────

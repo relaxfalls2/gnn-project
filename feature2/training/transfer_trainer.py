@@ -152,6 +152,8 @@ class TransferTrainer:
 
     def _build_loader(self, dataset, shuffle: bool = False) -> PyGDataLoader:
         available_cpus = os.cpu_count() or 1
+        # Cap at 4 workers to improve host-to-device throughput without
+        # oversubscribing typical single-GPU training pods.
         num_workers = min(4, available_cpus)
         return PyGDataLoader(
             dataset,
